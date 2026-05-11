@@ -1,9 +1,8 @@
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-import sqlite3
-import json
-from typing import Optional
+from sqlmodel import SQLModel, Field, Session, create_engine, select
+from sqlalchemy import cast, func, Float, Integer
 
 app = FastAPI()
 
@@ -11,45 +10,62 @@ app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-def get_db_connection():
-    conn = sqlite3.connect('state_pop.db')
-    conn.row_factory = sqlite3.Row
-    return conn
+class StatePopulation(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    state: str
+    population: str
+    annual_change: str
+
+
+DB_NAME = "state_pop.db"
+engine = create_engine(f"sqlite:///{DB_NAME}")
+SQLModel.metadata.create_all(engine)
+
+
+def get_db_session():
+    return Session(engine)
 
 
 @app.get("/api/states", response_model=list)
-def get_states(sort_by: Optional[str] = None, order: Optional[str] = "asc"):
+def get_states(sort_by: str | None = None, order: str = "asc"):
     """
     Fetch states data from database with optional sorting.
     sort_by: 'state', 'population', 'annual_change'
     order: 'asc' or 'desc'
     """
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    query = "SELECT * FROM state_pop"
-    
+    stmt = select(StatePopulation)
+
     if sort_by:
-        sort_by = sort_by.lower()
-        if sort_by == "state":
-            query += f" ORDER BY State {order.upper()}"
-        elif sort_by == "population":
-            query += f" ORDER BY CAST(REPLACE(Population, ',', '') AS INTEGER) {order.upper()}"
-        elif sort_by == "annual_change":
-            query += f" ORDER BY CAST(REPLACE(\"Annual Change\", '%', '') AS REAL) {order.upper()}"
-    
-    cursor.execute(query)
-    rows = cursor.fetchall()
-    conn.close()
-    
+        sort_key = sort_by.lower()
+        is_desc = order.lower() == "desc"
+        if sort_key == "state":
+            stmt = stmt.order_by(StatePopulation.state.desc() if is_desc else StatePopulation.state)
+        elif sort_key == "population":
+            stmt = stmt.order_by(
+                cast(func.replace(StatePopulation.population, ",", ""), Integer).desc()
+                if is_desc
+                else cast(func.replace(StatePopulation.population, ",", ""), Integer)
+            )
+        elif sort_key == "annual_change":
+            stmt = stmt.order_by(
+                cast(func.replace(StatePopulation.annual_change, "%", ""), Float).desc()
+                if is_desc
+                else cast(func.replace(StatePopulation.annual_change, "%", ""), Float)
+            )
+
+    with get_db_session() as session:
+        rows = session.exec(stmt).all()
+
     result = []
     for row in rows:
-        row_dict = dict(row)
-        # Normalize column name for JavaScript
-        if 'Annual Change' in row_dict:
-            row_dict['Annual_Change'] = row_dict.pop('Annual Change')
-        result.append(row_dict)
-    
+        result.append(
+            {
+                "State": row.state,
+                "Population": row.population,
+                "Annual_Change": row.annual_change,
+            }
+        )
+
     return result
 
 
